@@ -93,6 +93,11 @@ If no link is printed, find the address under **Settings → Wi-Fi → (i) next 
 On the iPhone's own Personal Hotspot, the address is always `172.20.10.1`, so open
 `http://172.20.10.1:8080` on the Chromebook.
 
+### Optional: a launcher file for the Chromebook
+
+Save `launcher.html` on the Chromebook and open it from the **Files** app. Enter the phone's
+address and key once; it remembers them and opens the proxy with one click.
+
 ### If the printed link doesn't load
 
 - Check both devices are on the same Wi-Fi network (guest networks and school or work Wi-Fi often block devices from reaching each other).
