@@ -338,12 +338,22 @@ def main():
     parser = argparse.ArgumentParser(description="Tiny local web proxy")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="address to listen on (Chromebook fallback: 0.0.0.0, then open penguin.linux.test)",
+    )
     args = parser.parse_args()
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.daemon_threads = True
-    url = "http://127.0.0.1:%d/" % args.port
-    print("Proxy running at %s  (only reachable from this computer)" % url)
+    if args.host in ("127.0.0.1", "localhost"):
+        url = "http://127.0.0.1:%d/" % args.port
+        print("Proxy running at %s  (only reachable from this computer)" % url)
+    else:
+        url = "http://localhost:%d/" % args.port
+        print("Proxy listening on %s:%d" % (args.host, args.port))
+        print("On a Chromebook open http://penguin.linux.test:%d/" % args.port)
     print("Press Ctrl+C to stop.")
     if not args.no_browser:
         threading.Timer(0.5, webbrowser.open, [url]).start()

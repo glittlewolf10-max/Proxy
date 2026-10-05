@@ -2,7 +2,34 @@
 
 A small web proxy just for you. It runs on your own computer and you use it from a web page.
 
-## Run it
+## Run it on a Chromebook
+
+ChromeOS can't run Python directly, but its built-in **Linux** feature can. Set it up once:
+
+1. Open **Settings → About ChromeOS → Developers → Linux development environment → Turn on**.
+   Accept the defaults and wait a few minutes. A **Terminal** window opens when it's done.
+2. Download `proxy.py` and `index.html` (for example with GitHub's **Code → Download ZIP**).
+3. Open the **Files** app and drag both files from **Downloads** into **Linux files**.
+4. In the Terminal app, run:
+
+   ```
+   python3 proxy.py
+   ```
+
+5. A Chrome tab opens at **http://127.0.0.1:8080**. If it doesn't, open that address yourself.
+
+After that, open the Terminal app and run `python3 proxy.py` whenever you want to use the proxy.
+Press `Ctrl+C` in the terminal (or close it) to stop.
+
+**If Chrome says it can't reach the page:** stop the proxy and run `python3 proxy.py --host 0.0.0.0`.
+Then open **http://penguin.linux.test:8080**. This is still private to your Chromebook,
+because the Linux environment isn't reachable from your Wi-Fi network unless you turn on
+port forwarding in Settings.
+
+**If there's no "Linux development environment" option:** the Chromebook is managed by a
+school or work account, which has turned Linux off. The proxy can't run there.
+
+## Run it on Windows, Mac or Linux
 
 1. Install Python 3 (already there on macOS and Linux; on Windows get it from python.org).
 2. Put `proxy.py` and `index.html` in the same folder.
