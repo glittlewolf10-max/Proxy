@@ -34,6 +34,13 @@
   .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   #status { min-height: 1.5em; font-size: 14px; }
   .ok { color: var(--ok); } .bad { color: var(--bad); }
+  a.button { display: block; text-align: center; text-decoration: none; font-weight: 600; padding: 11px;
+    border-radius: 10px; background: var(--accent); color: var(--accent-text); }
+  .linkbox { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center;
+    background: var(--input); border-radius: 10px; padding: 8px 8px 8px 12px; }
+  .linkbox code { font-size: 13px; word-break: break-all; }
+  .linkbox button { padding: 6px 12px; font-size: 14px; }
+  .notice { background: #fef3c7; color: #78350f; padding: 12px; border-radius: 10px; }
   details { color: var(--muted); font-size: 14px; }
   summary { cursor: pointer; }
 </style>
@@ -52,9 +59,16 @@
 
     <div class="buttons">
       <button type="button" class="secondary" id="test">Test connection</button>
-      <button type="submit">Open proxy</button>
+      <a class="button" id="open" href="#" target="_blank" rel="noopener">Open proxy</a>
     </div>
     <div id="status"></div>
+    <noscript><div class="notice">Scripts are turned off for this page, so the launcher can't build the link.
+      Type <code>http://172.20.10.1:8080</code> into Chrome's address bar instead.</div></noscript>
+
+    <div>
+      <p style="margin-bottom:6px">If nothing opens, copy this link into a new Chrome tab:</p>
+      <div class="linkbox"><code id="link">—</code><button type="button" class="secondary" id="copy">Copy</button></div>
+    </div>
 
     <details>
       <summary>Where do I find the address?</summary>
@@ -97,10 +111,9 @@
     } finally { clearTimeout(timer); }
   };
 
-  $('form').onsubmit = e => {
-    e.preventDefault();
+  function proxyLink() {
     const b = base();
-    if (!b) return status('Enter your phone\'s address first.', 'bad');
+    if (!b) return null;
     const key = $('key').value.trim();
     let target = $('url').value.trim();
     if (target && !/^https?:\/\//i.test(target)) {
@@ -108,7 +121,40 @@
         ? 'https://' + target
         : 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(target);
     }
-    location.href = b + '/' + (key ? '?key=' + encodeURIComponent(key) : '') + (target ? '#' + target : '');
+    return b + '/' + (key ? '?key=' + encodeURIComponent(key) : '') + (target ? '#' + target : '');
+  }
+
+  // Keep the button and the visible link up to date as you type.
+  function refresh() {
+    const link = proxyLink();
+    $('link').textContent = link || '—';
+    $('open').href = link || '#';
+  }
+  ['host', 'port', 'key', 'url'].forEach(f => $(f).addEventListener('input', refresh));
+  refresh();
+
+  $('open').addEventListener('click', e => {
+    refresh();
+    if (!proxyLink()) { e.preventDefault(); status('Enter your phone\'s address first.', 'bad'); return; }
+    status('Opening in a new tab… If nothing opens, use the Copy button below.');
+  });
+
+  $('form').onsubmit = e => e.preventDefault();
+  ['host', 'port', 'key', 'url'].forEach(f => $(f).addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); $('open').click(); }
+  }));
+
+  $('copy').onclick = async () => {
+    const link = proxyLink();
+    if (!link) return status('Enter your phone\'s address first.', 'bad');
+    try {
+      await navigator.clipboard.writeText(link);
+    } catch (_) {
+      const r = document.createRange(); r.selectNodeContents($('link'));
+      const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      document.execCommand && document.execCommand('copy');
+    }
+    status('Link copied. Paste it into a new Chrome tab.', 'ok');
   };
 </script>
 </body>
