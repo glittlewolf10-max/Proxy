@@ -3,19 +3,26 @@
 
 Run:   python3 proxy.py            (then open http://127.0.0.1:8080)
        python3 proxy.py --port 9000 --no-browser
+       python3 proxy.py --share    (run on a phone, use from another device)
 
-It only listens on 127.0.0.1, so nothing else on your network can use it.
+By default it only listens on 127.0.0.1, so nothing else on your network can
+use it. With --share it listens on your Wi-Fi and asks for a secret key.
 Pure standard library - no pip installs needed.
 """
 
 import argparse
+import ipaddress
 import gzip
+import hmac
 import html
 import http.cookiejar
 import json
 import os
 import re
+import secrets
 import shutil
+import socket
+import subprocess
 import sys
 import threading
 import urllib.error
@@ -205,6 +212,8 @@ class Handler(BaseHTTPRequestHandler):
         self.route()
 
     def route(self):
+        if self.server.key and not self.authorized():
+            return
         if self.path in ("/", "/index.html"):
             return self.serve_file("index.html", "text/html; charset=utf-8")
         if self.path.startswith(PREFIX):
@@ -216,7 +225,48 @@ class Handler(BaseHTTPRequestHandler):
         if site:
             fixed = urllib.parse.urljoin(site, self.path)
             return self.redirect(PREFIX + fixed, code=307)
-        self.send_error(404, "Not found - start from http://127.0.0.1:%d/" % self.server.server_port)
+        self.send_error(404, "Not found - start from the proxy's home page")
+
+    def authorized(self):
+        """In --share mode every request needs the key (kept in a cookie).
+
+        Returns True to carry on; otherwise a login page or redirect was sent.
+        """
+        key = self.server.key.encode()
+        for part in self.headers.get("Cookie", "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == "proxykey" and hmac.compare_digest(value.encode(), key):
+                return True
+        parts = urllib.parse.urlsplit(self.path)
+        given = urllib.parse.parse_qs(parts.query).get("key", [""])[0].strip()
+        if parts.path == "/" and given and hmac.compare_digest(given.encode(), key):
+            self.send_response(302)
+            self.send_header(
+                "Set-Cookie",
+                "proxykey=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000" % self.server.key,
+            )
+            self.send_header("Location", "/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
+        body = (
+            "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+            "<title>Local Proxy</title>"
+            "<body style='font:16px system-ui;padding:2rem;max-width:30rem;margin:auto'>"
+            "<h2>Enter the proxy key</h2>"
+            "<p>It's shown in the terminal where the proxy is running.</p>%s"
+            "<form method=get action='/'><input name=key autofocus autocomplete=off "
+            "style='font:inherit;padding:8px;width:100%%;box-sizing:border-box'>"
+            "<p><button style='font:inherit;padding:8px 16px'>Unlock</button></p></form>"
+            % ("<p style='color:#b91c1c'>That key isn't right.</p>" if given else "")
+        ).encode()
+        self.send_response(401)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+        return False
 
     def referer_target(self):
         ref = self.headers.get("Referer", "")
@@ -334,28 +384,72 @@ class Handler(BaseHTTPRequestHandler):
                     pass
 
 
+def lan_addresses():
+    """Best guesses at this device's Wi-Fi / hotspot address."""
+    found = []
+    for cmd in (["ip", "-4", "-o", "addr"], ["ifconfig"]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=3).stdout
+            found += re.findall(r"inet (?:addr:)?(\d+\.\d+\.\d+\.\d+)", out)
+        except Exception:
+            pass
+    try:
+        # No packet is sent; this just asks which interface would be used.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            found.append(s.getsockname()[0])
+    except Exception:
+        pass
+    result = []
+    for addr in found:
+        ip = ipaddress.ip_address(addr)
+        if ip.is_private and not ip.is_loopback and addr not in result:
+            result.append(addr)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description="Tiny local web proxy")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
     parser.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="address to listen on (Chromebook fallback: 0.0.0.0, then open penguin.linux.test)",
+        "--share",
+        action="store_true",
+        help="listen on Wi-Fi so another device (e.g. a Chromebook) can use it; requires a key",
     )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="address to listen on (default 127.0.0.1, or 0.0.0.0 with --share)",
+    )
+    parser.add_argument("--key", help="use this key instead of a random one (--share mode)")
     args = parser.parse_args()
 
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    host = args.host or ("0.0.0.0" if args.share else "127.0.0.1")
+    local_only = host in ("127.0.0.1", "localhost")
+
+    server = ThreadingHTTPServer((host, args.port), Handler)
     server.daemon_threads = True
-    if args.host in ("127.0.0.1", "localhost"):
+    if args.key and not re.fullmatch(r"[A-Za-z0-9_-]+", args.key):
+        parser.error("--key may only use letters, digits, - and _")
+    readable = "abcdefghjkmnpqrstuvwxyz23456789"  # no look-alikes such as l/1, o/0
+    server.key = None if local_only else (
+        args.key or "".join(secrets.choice(readable) for _ in range(8))
+    )
+
+    if local_only:
         url = "http://127.0.0.1:%d/" % args.port
         print("Proxy running at %s  (only reachable from this computer)" % url)
     else:
-        url = "http://localhost:%d/" % args.port
-        print("Proxy listening on %s:%d" % (args.host, args.port))
-        print("On a Chromebook open http://penguin.linux.test:%d/" % args.port)
+        url = "http://localhost:%d/?key=%s" % (args.port, server.key)
+        print("Proxy is shared on your network. Key: %s" % server.key)
+        print("On the other device, open one of these in Chrome:")
+        for addr in lan_addresses():
+            print("    http://%s:%d/?key=%s" % (addr, args.port, server.key))
+        print("    http://penguin.linux.test:%d/?key=%s   (Chromebook Linux only)" % (args.port, server.key))
+        print("Anyone without the key just gets a password page.")
     print("Press Ctrl+C to stop.")
-    if not args.no_browser:
+    if not args.no_browser and not args.share:
         threading.Timer(0.5, webbrowser.open, [url]).start()
     try:
         server.serve_forever()

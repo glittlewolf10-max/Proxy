@@ -29,6 +29,57 @@ port forwarding in Settings.
 **If there's no "Linux development environment" option:** the Chromebook is managed by a
 school or work account, which has turned Linux off. The proxy can't run there.
 
+## Run it on your phone, use it on your Chromebook
+
+The phone runs the proxy; the Chromebook just opens a web page. Both devices must be on
+the **same Wi-Fi**, or connect the Chromebook to your **phone's hotspot**.
+
+### Android phone (recommended)
+
+1. Install **Termux** from F-Droid (f-droid.org) or its GitHub releases page. The Play Store version may be out of date.
+2. Download `proxy.py` and `index.html` on your phone.
+3. Open Termux and run these once:
+
+   ```
+   pkg install python
+   termux-setup-storage
+   cp ~/storage/downloads/proxy.py ~/storage/downloads/index.html ~
+   ```
+
+   (`termux-setup-storage` asks for permission to read your files; tap Allow.)
+
+4. Start the proxy:
+
+   ```
+   python proxy.py --share
+   ```
+
+   It prints a **key** and a link like `http://192.168.1.23:8080/?key=abcd2345`.
+
+5. On the Chromebook, type that link into Chrome. The key is saved, so next time you only need
+   `http://192.168.1.23:8080`.
+
+Keep Termux running while you browse. Pull down the Termux notification and tap
+**Acquire wakelock** so Android doesn't pause it when the screen turns off.
+
+### iPhone
+
+Install **a-Shell** from the App Store, copy both files into it with the Files app, and run
+`python3 proxy.py --share`. iOS pauses apps you switch away from, so a-Shell must stay open
+on screen while you browse. Android works much better for this.
+
+### If the printed link doesn't load
+
+- Check both devices are on the same Wi-Fi network (guest networks and school or work Wi-Fi often block devices from reaching each other).
+- Using the hotspot? The phone's address is the **gateway** shown on the Chromebook under
+  **Settings → Network → (your hotspot) → Network**. Open `http://<that address>:8080`.
+- Find the phone's address on Android under **Settings → About phone → Status → IP address**.
+
+### Keeping it private
+
+In `--share` mode anyone on the same Wi-Fi could find the proxy, so it asks for the key first.
+For the most privacy, use your phone's hotspot: then your Chromebook is the only device on the network.
+
 ## Run it on Windows, Mac or Linux
 
 1. Install Python 3 (already there on macOS and Linux; on Windows get it from python.org).
