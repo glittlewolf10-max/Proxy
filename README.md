@@ -8,15 +8,19 @@ ChromeOS can't run Python directly, but its built-in **Linux** feature can. Set 
 
 1. Open **Settings → About ChromeOS → Developers → Linux development environment → Turn on**.
    Accept the defaults and wait a few minutes. A **Terminal** window opens when it's done.
-2. Download `proxy.py` and `index.html` (for example with GitHub's **Code → Download ZIP**).
-3. Open the **Files** app and drag both files from **Downloads** into **Linux files**.
-4. In the Terminal app, run:
+2. In the Terminal app, download the two files with this command:
+
+   ```
+   python3 -c "import urllib.request as u;b='https://raw.githubusercontent.com/glittlewolf10-max/proxy/claude/local-proxy/';[u.urlretrieve(b+f,f) for f in ('proxy.py','index.html')]"
+   ```
+
+3. Start the proxy:
 
    ```
    python3 proxy.py
    ```
 
-5. A Chrome tab opens at **http://127.0.0.1:8080**. If it doesn't, open that address yourself.
+4. A Chrome tab opens at **http://127.0.0.1:8080**. If it doesn't, open that address yourself.
 
 After that, open the Terminal app and run `python3 proxy.py` whenever you want to use the proxy.
 Press `Ctrl+C` in the terminal (or close it) to stop.
@@ -65,9 +69,13 @@ Keep Termux running while you browse. Pull down the Termux notification and tap
 ### iPhone
 
 1. Install **a-Shell** (free) from the App Store.
-2. In Safari, download `proxy.py` and `index.html`. In the **Files** app, move both from
-   **Downloads** into **On My iPhone → a-Shell**.
-3. Open a-Shell and run:
+2. Open a-Shell and download the two files with this command:
+
+   ```
+   python3 -c "import urllib.request as u;b='https://raw.githubusercontent.com/glittlewolf10-max/proxy/claude/local-proxy/';[u.urlretrieve(b+f,f) for f in ('proxy.py','index.html')]"
+   ```
+
+3. Start the proxy:
 
    ```
    python3 proxy.py --share
