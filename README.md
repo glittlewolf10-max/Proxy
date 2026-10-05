@@ -64,9 +64,26 @@ Keep Termux running while you browse. Pull down the Termux notification and tap
 
 ### iPhone
 
-Install **a-Shell** from the App Store, copy both files into it with the Files app, and run
-`python3 proxy.py --share`. iOS pauses apps you switch away from, so a-Shell must stay open
-on screen while you browse. Android works much better for this.
+1. Install **a-Shell** (free) from the App Store.
+2. In Safari, download `proxy.py` and `index.html`. In the **Files** app, move both from
+   **Downloads** into **On My iPhone → a-Shell**.
+3. Open a-Shell and run:
+
+   ```
+   python3 proxy.py --share
+   ```
+
+   If iPhone asks to let a-Shell **find devices on your local network**, tap **Allow**. Without it
+   the Chromebook can't connect. (You can turn it on later under Settings → Privacy & Security → Local Network.)
+4. Type the printed link into Chrome on the Chromebook.
+
+**Keep a-Shell open on screen** while you browse. iOS pauses it as soon as you switch apps or
+the phone locks. While using it, set **Settings → Display & Brightness → Auto-Lock → Never**
+and plug the phone in.
+
+If no link is printed, find the address under **Settings → Wi-Fi → (i) next to your network → IP Address**.
+On the iPhone's own Personal Hotspot, the address is always `172.20.10.1`, so open
+`http://172.20.10.1:8080` on the Chromebook.
 
 ### If the printed link doesn't load
 
