@@ -110,6 +110,34 @@ address and key once; it remembers them and opens the proxy with one click.
 In `--share` mode anyone on the same Wi-Fi could find the proxy, so it asks for the key first.
 For the most privacy, use your phone's hotspot: then your Chromebook is the only device on the network.
 
+## Run it on a server (use it with just a browser)
+
+A browser can't be a proxy by itself, so something has to run `proxy.py`. If you don't want
+that to be your phone, you can run it on a server on the internet and open its address from any
+browser.
+
+**Check the host's rules first.** Most free hosts ban web proxies. As of October 2026, Render,
+Koyeb and Railway forbid them outright. Google Cloud's rules may cover them, Fly.io's free trial lasts only a few
+hours, and Replit bans scraping. You'll most likely need a small paid server (a "VPS")
+from a company whose terms allow it, or a computer you leave on at home.
+
+On the server:
+
+```
+PROXY_KEY=pick-a-long-secret-key-here PORT=8080 python3 proxy.py --cloud
+```
+
+- `PROXY_KEY` is required and must be at least 16 characters (letters, digits, `-` and `_`).
+  Anyone who has it can use your proxy.
+- `PORT` is the port to listen on. Many hosts set it for you.
+- Put HTTPS in front of it (most hosts do this for you, or use a reverse proxy such as Caddy) so the key
+  isn't sent in plain text.
+- After 10 wrong keys in a minute it stops accepting keys for a minute, which makes the key hard to guess.
+- In cloud mode the proxy refuses to open private addresses (like `10.x.x.x`, `192.168.x.x` or
+  the host's internal metadata service), so pages you visit can't use it to reach the server's private network.
+
+Open the server's address in Chrome and enter the key once; it's remembered after that.
+
 ## Run it on Windows, Mac or Linux
 
 1. Install Python 3 (already there on macOS and Linux; on Windows get it from python.org).
@@ -128,7 +156,9 @@ Press `Ctrl+C` in the terminal to stop. Use another port with `python3 proxy.py 
 
 ## Notes
 
-- It only listens on `127.0.0.1`, so other devices can't use it.
+- By default it only listens on `127.0.0.1`, so other devices can't use it. In that mode it also
+  ignores requests addressed to any other name, so websites can't reach it with DNS tricks.
 - You need no extra installs. It uses only the Python standard library.
+- Video and audio can skip ahead (the proxy passes byte-range requests through).
 - Simple and medium sites work well. Heavy single-page apps (YouTube, Google Docs, sites with logins and captchas) may break.
 - Every proxied site runs on the same local address, so sites could read each other's cookies and storage. Don't sign in to important accounts (bank, email) through it.

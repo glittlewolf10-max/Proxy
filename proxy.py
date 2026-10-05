@@ -4,9 +4,12 @@
 Run:   python3 proxy.py            (then open http://127.0.0.1:8080)
        python3 proxy.py --port 9000 --no-browser
        python3 proxy.py --share    (run on a phone, use from another device)
+       python3 proxy.py --cloud    (run on a cloud host; needs $PROXY_KEY)
 
 By default it only listens on 127.0.0.1, so nothing else on your network can
 use it. With --share it listens on your Wi-Fi and asks for a secret key.
+With --cloud it listens on $PORT, asks for $PROXY_KEY, and won't open
+addresses on the host's private network.
 Pure standard library - no pip installs needed.
 """
 
@@ -15,6 +18,7 @@ import ipaddress
 import gzip
 import hmac
 import html
+import http.client
 import http.cookiejar
 import json
 import os
@@ -25,6 +29,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -64,14 +69,23 @@ FORWARD_REQUEST_HEADERS = {
     "content-type",
     "cache-control",
     "pragma",
+    # Needed for video/audio seeking and for the browser's own cache.
+    "range",
+    "if-range",
+    "if-none-match",
+    "if-modified-since",
 }
 
 SKIP_SCHEMES = ("#", "javascript:", "data:", "mailto:", "tel:", "blob:", "about:")
 
+# Matches quoted values (href="x", href='x') and unquoted ones (href=x).
 ATTR_RE = re.compile(
-    r"""(\s(?:href|src|action|poster|data-src|formaction)\s*=\s*)(["'])(.*?)\2""",
+    r"""(\s(?:href|src|action|poster|data-src|formaction)\s*=\s*)"""
+    r"""(?:(["'])(.*?)\2|([^\s"'<>`=]+))""",
     re.IGNORECASE | re.DOTALL,
 )
+# One HTML start tag, allowing ">" inside quoted attribute values.
+TAG_RE = re.compile(r"""<[a-zA-Z][^\s>/]*(?:[^>"']|"[^"]*"|'[^']*')*>""")
 SRCSET_RE = re.compile(r"""(\ssrcset\s*=\s*)(["'])(.*?)\2""", re.IGNORECASE | re.DOTALL)
 CSS_URL_RE = re.compile(r"""url\(\s*(["']?)([^"')]*?)\1\s*\)""", re.IGNORECASE)
 CSS_IMPORT_RE = re.compile(r"""(@import\s+)(["'])(.*?)\2""", re.IGNORECASE)
@@ -94,9 +108,82 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-opener = urllib.request.build_opener(
-    urllib.request.HTTPCookieProcessor(cookie_jar), _NoRedirect()
-)
+def is_public_address(addr):
+    ip = ipaddress.ip_address(addr.split("%")[0])
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return ip.is_global
+
+
+class _GuardedConnection:
+    """In --cloud mode, refuse to talk to private addresses.
+
+    Otherwise a page loaded through the proxy could make it fetch things only
+    the server can reach (the host's internal network, cloud metadata). The
+    check runs on the address actually connected to, so DNS tricks can't
+    get around it.
+    """
+
+    block_private = False
+
+    def connect(self):
+        super().connect()
+        if self.block_private and not is_public_address(self.sock.getpeername()[0]):
+            self.sock.close()
+            raise OSError("%s is a private network address; the proxy won't open it" % self.host)
+
+
+class _GuardedHTTP(_GuardedConnection, http.client.HTTPConnection):
+    pass
+
+
+class _GuardedHTTPS(_GuardedConnection, http.client.HTTPSConnection):
+    pass
+
+
+class _HTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_GuardedHTTP, req)
+
+
+class _HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_GuardedHTTPS, req, context=self._context)
+
+
+def make_opener(direct=False):
+    handlers = [urllib.request.HTTPCookieProcessor(cookie_jar), _NoRedirect(), _HTTPHandler(), _HTTPSHandler()]
+    if direct:
+        # Ignore HTTP(S)_PROXY settings, so the private-address check sees
+        # the real site rather than an outbound proxy.
+        handlers.append(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*handlers)
+
+
+opener = make_opener()
+
+
+class KeyAttempts:
+    """Slows down anyone guessing the key: 10 wrong tries a minute, then wait."""
+
+    LIMIT, WINDOW = 10, 60
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.failures = []
+
+    def blocked(self):
+        with self.lock:
+            now = time.monotonic()
+            self.failures = [t for t in self.failures if now - t < self.WINDOW]
+            return len(self.failures) >= self.LIMIT
+
+    def failed(self):
+        with self.lock:
+            self.failures.append(time.monotonic())
+
+
+key_attempts = KeyAttempts()
 
 
 def to_proxy(url, base):
@@ -154,8 +241,9 @@ def rewrite_html(text, target):
         text = BASE_RE.sub("", text)
 
     def attr(m):
-        value = html.unescape(m.group(3))
-        return m.group(1) + m.group(2) + html.escape(to_proxy(value, base), quote=True) + m.group(2)
+        quote = m.group(2) or '"'  # unquoted values come back quoted
+        value = html.unescape(m.group(3) if m.group(2) else m.group(4))
+        return m.group(1) + quote + html.escape(to_proxy(value, base), quote=True) + quote
 
     def srcset(m):
         parts = []
@@ -168,8 +256,8 @@ def rewrite_html(text, target):
 
     text = META_BLOCK_RE.sub("", text)
     text = INTEGRITY_RE.sub("", text)
-    text = ATTR_RE.sub(attr, text)
-    text = SRCSET_RE.sub(srcset, text)
+    # Only touch attributes inside tags, so JavaScript like "var src=x" is left alone.
+    text = TAG_RE.sub(lambda t: SRCSET_RE.sub(srcset, ATTR_RE.sub(attr, t.group(0))), text)
     text = rewrite_css(text, base)
 
     script = inject_script(base, target)
@@ -199,7 +287,8 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "LocalProxy/1.0"
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("  %s\n" % (fmt % args))
+        line = re.sub(r"key=[^&\s\"]*", "key=***", fmt % args)  # keep the key out of logs
+        sys.stderr.write("  %s\n" % line)
 
     # ---- routing -------------------------------------------------------
     def do_GET(self):
@@ -211,7 +300,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.route()
 
+    def do_PUT(self):
+        self.route()
+
+    def do_PATCH(self):
+        self.route()
+
+    def do_DELETE(self):
+        self.route()
+
+    def do_OPTIONS(self):
+        self.route()
+
     def route(self):
+        if self.server.allowed_hosts is not None:
+            # Without a key, only answer to our own address. This stops other
+            # websites using DNS tricks to reach the proxy from your browser.
+            if self.headers.get("Host", "").lower() not in self.server.allowed_hosts:
+                return self.send_error(403, "Unexpected Host header")
         if self.server.key and not self.authorized():
             return
         if self.path in ("/", "/index.html"):
@@ -238,27 +344,41 @@ class Handler(BaseHTTPRequestHandler):
             if name == "proxykey" and hmac.compare_digest(value.encode(), key):
                 return True
         parts = urllib.parse.urlsplit(self.path)
-        given = urllib.parse.parse_qs(parts.query).get("key", [""])[0].strip()
-        if parts.path == "/" and given and hmac.compare_digest(given.encode(), key):
-            self.send_response(302)
-            self.send_header(
-                "Set-Cookie",
-                "proxykey=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000" % self.server.key,
-            )
-            self.send_header("Location", "/")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return False
+        query = parts.query
+        if self.command == "POST" and parts.path == "/":
+            length = min(int(self.headers.get("Content-Length") or 0), 4096)
+            query = self.rfile.read(length).decode("utf-8", "replace")
+        given = urllib.parse.parse_qs(query).get("key", [""])[0].strip()
+        if given and parts.path == "/":
+            if key_attempts.blocked():
+                return self.send_error(429, "Too many wrong keys - wait a minute and try again")
+            if hmac.compare_digest(given.encode(), key):
+                secure = self.headers.get("X-Forwarded-Proto", "") == "https" and self.server.cloud
+                self.send_response(303)
+                self.send_header(
+                    "Set-Cookie",
+                    "proxykey=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000%s"
+                    % (self.server.key, "; Secure" if secure else ""),
+                )
+                self.send_header("Location", "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
+            key_attempts.failed()
         body = (
             "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
             "<title>Local Proxy</title>"
             "<body style='font:16px system-ui;padding:2rem;max-width:30rem;margin:auto'>"
             "<h2>Enter the proxy key</h2>"
-            "<p>It's shown in the terminal where the proxy is running.</p>%s"
-            "<form method=get action='/'><input name=key autofocus autocomplete=off "
+            "<p>%s</p>%s"
+            "<form method=post action='/'><input name=key type=password autofocus autocomplete=off "
             "style='font:inherit;padding:8px;width:100%%;box-sizing:border-box'>"
             "<p><button style='font:inherit;padding:8px 16px'>Unlock</button></p></form>"
-            % ("<p style='color:#b91c1c'>That key isn't right.</p>" if given else "")
+            % (
+                "It's the PROXY_KEY you set on your cloud host." if self.server.cloud
+                else "It's shown in the terminal where the proxy is running.",
+                "<p style='color:#b91c1c'>That key isn't right.</p>" if given else "",
+            )
         ).encode()
         self.send_response(401)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -305,7 +425,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     # ---- the actual proxy ---------------------------------------------
     def proxy(self, target):
@@ -315,13 +436,15 @@ class Handler(BaseHTTPRequestHandler):
         target = re.sub(r"^(https?):/(?!/)", r"\1://", target, flags=re.IGNORECASE)
 
         headers = {k: v for k, v in self.headers.items() if k.lower() in FORWARD_REQUEST_HEADERS}
-        headers["Accept-Encoding"] = "gzip, deflate"
+        # A compressed partial response can't be decoded, so ask for plain bytes
+        # when the browser wants a byte range (video seeking).
+        headers["Accept-Encoding"] = "identity" if "range" in (k.lower() for k in headers) else "gzip, deflate"
         upstream_ref = self.referer_target()
         if upstream_ref:
             headers["Referer"] = upstream_ref
 
         body = None
-        if self.command == "POST":
+        if self.command in ("POST", "PUT", "PATCH", "DELETE"):
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
 
@@ -340,12 +463,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.redirect(PREFIX + urllib.parse.urljoin(target, location), status)
 
             ctype = resp.headers.get("Content-Type", "")
-            rewrite = "text/html" in ctype or "text/css" in ctype
+            # A 206 is only part of the file, so it can't be rewritten safely.
+            rewrite = status != 206 and ("text/html" in ctype or "text/css" in ctype)
 
             self.send_response(status)
             for k, v in resp.headers.items():
                 if k.lower() not in DROP_RESPONSE_HEADERS:
                     self.send_header(k, v)
+
+            if self.command == "HEAD" or status in (204, 304) or status < 200:
+                # These responses never carry a body.
+                self.end_headers()
+                return
 
             if rewrite:
                 raw = decode_body(resp.read(), resp.headers.get("Content-Encoding"))
@@ -359,8 +488,7 @@ class Handler(BaseHTTPRequestHandler):
                 out = text.encode(charset, errors="replace")
                 self.send_header("Content-Length", str(len(out)))
                 self.end_headers()
-                if self.command != "HEAD":
-                    self.wfile.write(out)
+                self.wfile.write(out)
                 return
 
             encoding = resp.headers.get("Content-Encoding")
@@ -368,8 +496,7 @@ class Handler(BaseHTTPRequestHandler):
                 out = decode_body(resp.read(), encoding)
                 self.send_header("Content-Length", str(len(out)))
                 self.end_headers()
-                if self.command != "HEAD":
-                    self.wfile.write(out)
+                self.wfile.write(out)
                 return
 
             # Everything else (images, JS, video...) is streamed straight through.
@@ -377,11 +504,10 @@ class Handler(BaseHTTPRequestHandler):
             if length:
                 self.send_header("Content-Length", length)
             self.end_headers()
-            if self.command != "HEAD":
-                try:
-                    shutil.copyfileobj(resp, self.wfile, 64 * 1024)
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
+            try:
+                shutil.copyfileobj(resp, self.wfile, 64 * 1024)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
 
 def lan_addresses():
@@ -410,7 +536,7 @@ def lan_addresses():
 
 def main():
     parser = argparse.ArgumentParser(description="Tiny local web proxy")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=None, help="default 8080 (or $PORT with --cloud)")
     parser.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
     parser.add_argument(
         "--share",
@@ -418,38 +544,65 @@ def main():
         help="listen on Wi-Fi so another device (e.g. a Chromebook) can use it; requires a key",
     )
     parser.add_argument(
+        "--cloud",
+        action="store_true",
+        help="run on a cloud host: listen on $PORT, key from $PROXY_KEY, block private addresses",
+    )
+    parser.add_argument(
         "--host",
         default=None,
-        help="address to listen on (default 127.0.0.1, or 0.0.0.0 with --share)",
+        help="address to listen on (default 127.0.0.1, or 0.0.0.0 with --share/--cloud)",
     )
     parser.add_argument("--key", help="use this key instead of a random one (--share mode)")
     args = parser.parse_args()
 
-    host = args.host or ("0.0.0.0" if args.share else "127.0.0.1")
-    local_only = host in ("127.0.0.1", "localhost")
+    port = args.port or int((os.environ.get("PORT") if args.cloud else None) or 8080)
+    host = args.host or ("0.0.0.0" if args.share or args.cloud else "127.0.0.1")
+    local_only = host in ("127.0.0.1", "localhost") and not args.cloud
+    key = args.key or (os.environ.get("PROXY_KEY", "").strip() if args.cloud else None)
 
-    server = ThreadingHTTPServer((host, args.port), Handler)
+    if key and not re.fullmatch(r"[A-Za-z0-9_-]+", key):
+        parser.error("the key may only use letters, digits, - and _")
+    if args.cloud and (not key or len(key) < 16):
+        example = "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(20))
+        parser.error(
+            "--cloud needs a key of at least 16 characters, because the proxy is on the "
+            "public internet. Set the PROXY_KEY environment variable on your host, "
+            "for example: PROXY_KEY=%s" % example
+        )
+
+    server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
-    if args.key and not re.fullmatch(r"[A-Za-z0-9_-]+", args.key):
-        parser.error("--key may only use letters, digits, - and _")
+    server.cloud = args.cloud
+    if args.cloud:
+        global opener
+        opener = make_opener(direct=True)
+        _GuardedConnection.block_private = True
     readable = "abcdefghjkmnpqrstuvwxyz23456789"  # no look-alikes such as l/1, o/0
-    server.key = None if local_only else (
-        args.key or "".join(secrets.choice(readable) for _ in range(8))
+    server.key = None if local_only else (key or "".join(secrets.choice(readable) for _ in range(8)))
+    # With no key, only answer requests addressed to this machine (see route()).
+    server.allowed_hosts = (
+        {h + p for h in ("127.0.0.1", "localhost") for p in ("", ":%d" % port)} if local_only else None
     )
 
-    if local_only:
-        url = "http://127.0.0.1:%d/" % args.port
+    if args.cloud:
+        url = None
+        print("Proxy running in cloud mode on port %d." % port)
+        print("Open your host's web address and enter your PROXY_KEY.")
+    elif local_only:
+        url = "http://127.0.0.1:%d/" % port
         print("Proxy running at %s  (only reachable from this computer)" % url)
     else:
-        url = "http://localhost:%d/?key=%s" % (args.port, server.key)
+        url = "http://localhost:%d/?key=%s" % (port, server.key)
         print("Proxy is shared on your network. Key: %s" % server.key)
         print("On the other device, open one of these in Chrome:")
         for addr in lan_addresses():
-            print("    http://%s:%d/?key=%s" % (addr, args.port, server.key))
-        print("    http://penguin.linux.test:%d/?key=%s   (Chromebook Linux only)" % (args.port, server.key))
+            print("    http://%s:%d/?key=%s" % (addr, port, server.key))
+        print("    http://penguin.linux.test:%d/?key=%s   (Chromebook Linux only)" % (port, server.key))
         print("Anyone without the key just gets a password page.")
     print("Press Ctrl+C to stop.")
-    if not args.no_browser and not args.share:
+    sys.stdout.flush()
+    if url and not args.no_browser and not args.share:
         threading.Timer(0.5, webbrowser.open, [url]).start()
     try:
         server.serve_forever()
